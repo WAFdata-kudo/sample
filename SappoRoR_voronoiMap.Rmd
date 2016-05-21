@@ -1,0 +1,116 @@
+---
+title: "SappoRoR_voronoiMap"
+author: "WAFdata_kudo"
+date: "2015年11月8日"
+output:
+  html_document:
+  theme: readable
+---
+
+##データの準備
+
+札幌市内全域のコンビニ(セブン、ローソン、セイコマ)の緯度経度データセット
+合計825店舗
+
+```{r setup,include=FALSE}
+library(deldir)
+library(magrittr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(leaflet)
+library(sp)
+```
+
+```{r data,echo=FALSE}
+df<-read.csv("location_convini.csv",header=TRUE,stringsAsFactors = FALSE)
+df<-df[,2:4]
+
+tail(df,15)
+```
+
+##ボロノイ分割
+
+
+```{r}
+#描画の範囲を固める
+xrng <- scales::expand_range(range(df$lon), .05)
+yrng <- scales::expand_range(range(df$lat), .05)
+
+#ボロノイ分割(戻り値はlist)
+result_deldir <- deldir::deldir(x=df$lon,y=df$lat, rw = c(xrng, yrng))
+tilelist <- deldir::tile.list(result_deldir) #分割したtileを取得
+
+#内部構造を見てみる
+tilelist[[721]]
+
+#ボロノイ分割の結果を見てみる
+ggplot2::qplot(lon, lat, data = df)+geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), size = .25,data = result_deldir$dirsgs)
+
+#ポリゴン化
+polys<-vector(mode='list', length=length(tilelist))
+for (i in seq(along=polys)) {
+  voronoi<-cbind(tilelist[[i]]$x, tilelist[[i]]$y)
+  voronoi<-rbind(voronoi, voronoi[1,])
+  polys[[i]]<-Polygons(list(Polygon(voronoi)), ID=as.character(i))
+}
+
+SP<-SpatialPolygons(polys)
+slotNames(SP)
+
+#ドロネー点を取得してうまいことやりたかった
+#tiledf <- delsgs %>% 
+  #dplyr::inner_join(.,df,by=c("lon","lat")) #ドロネー点の緯度経度が完全一致でないためできない
+
+#----------------------------------------------------------------------------------
+# tiledf2の緯度経度とdfの緯度経度を比較して最も近い店の名前を取得
+
+# ptに店の緯度経度とほぼ同じ緯度経度が入っている
+tiledf <- dplyr::bind_rows(lapply(tilelist, function(l){
+  data.frame(tile = l$ptNum, lon = l$pt["x"], lat = l$pt["y"])
+}))
+# 近傍点を返す関数を定義
+getNearPoint <- function(x, y){
+  tmp <- dplyr::bind_rows(x, y)[,c("lon", "lat")]
+  res <- as.matrix(dist(tmp))[-1,1]
+  result <- y[which.min(res), "store"]
+  return(result)
+}
+
+# 近傍点のコンビニ名を入れる
+for(i in seq(nrow(tiledf))){
+  tiledf$store[i] <- getNearPoint(tiledf[i,], df)
+}
+#------------------------------------------------------------------------------------
+
+#rownumberがそろってないとだめで、かつdataはdataframeの必要あり
+voronoi<-SpatialPolygonsDataFrame(SP,data=as.data.frame(tiledf))
+
+```
+
+描画をします
+
+```{r}
+#viewの準備
+sapporo <- leaflet() %>% setView(lng = 141.3508, lat = 43.06862,zoom = 10)
+#色セットの定義
+pal <- colorFactor(c("#e34a33", "#2ca25f","#43a2ca"), domain = c("セイコーマート", "セブンイレブン","ローソン"))
+
+sapporo %>% 
+  addProviderTiles("OpenStreetMap.Mapnik") %>% 
+  addPolygons(stroke=FALSE,data = voronoi,color=~pal(store),fillOpacity = 0.6) %>% 
+  addPolylines(data = voronoi,color = "black",weight = 2.5)
+```
+
+きちんと店舗と同じ色になっているかどうかも見てみる
+
+```{r}
+sapporo %>% 
+  addProviderTiles("OpenStreetMap.Mapnik") %>% 
+  addCircleMarkers(stroke=FALSE,data = df,~lon, ~lat,color=~pal(store),fillOpacity = 1) %>% 
+  addPolygons(stroke=FALSE,data = voronoi,color=~pal(store),fillOpacity = 0.5) %>% 
+  addPolylines(data = voronoi,color = "black",weight = 2.5)
+
+```
+
+おわり
